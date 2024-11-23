@@ -16,6 +16,7 @@ from lvdm.basics import (
 from lvdm.modules.attention import SpatialTransformer, TemporalTransformer
 
 
+
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
@@ -532,6 +533,10 @@ class UNetModel(nn.Module):
         )
 
     def forward(self, x, timesteps, context=None, features_adapter=None, fps=16, **kwargs):
+        mesh = kwargs.get('mesh',None) #import torch_xla.distributed.spmd as xs
+        if mesh is not None:
+            import torch_xla.distributed.spmd as xs
+
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
 
@@ -553,8 +558,27 @@ class UNetModel(nn.Module):
         adapter_idx = 0
         hs = []
         for id, module in enumerate(self.input_blocks):
+            if mesh is not None:
+                shard_spec = [None for i in range(len(h.shape))]
+                shard_spec[0] = 'data'
+                shard_spec = tuple(shard_spec)
+                shard_spec_c = [None for i in range(len(context.shape))]
+                shard_spec_c[0] = 'data'
+                shard_spec_c = tuple(shard_spec_c)
+                xs.mark_sharding(h,mesh,shard_spec)
+                xs.mark_sharding(context,mesh,shard_spec_c)
+                
             h = module(h, emb, context=context, batch_size=b)
             if id ==0 and self.addition_attention:
+                if mesh is not None:
+                    shard_spec = [None for i in range(len(h.shape))]
+                    shard_spec[0] = 'data'
+                    shard_spec = tuple(shard_spec)
+                    xs.mark_sharding(h,mesh,shard_spec)
+                    shard_spec_c = [None for i in range(len(context.shape))]
+                    shard_spec_c[0] = 'data'
+                    shard_spec_c = tuple(shard_spec_c)
+                    xs.mark_sharding(context,mesh,shard_spec_c)
                 h = self.init_attn(h, emb, context=context, batch_size=b)
             ## plug-in adapter features
             if ((id+1)%3 == 0) and features_adapter is not None:
@@ -564,14 +588,47 @@ class UNetModel(nn.Module):
         if features_adapter is not None:
             assert len(features_adapter)==adapter_idx, 'Wrong features_adapter'
 
+        if mesh is not None:
+            shard_spec = [None for i in range(len(h.shape))]
+            shard_spec[0] = 'data'
+            shard_spec = tuple(shard_spec)
+            
+            shard_spec_c = [None for i in range(len(context.shape))]
+            shard_spec_c[0] = 'data'
+            shard_spec_c = tuple(shard_spec_c)
+            xs.mark_sharding(h,mesh,shard_spec)
+            xs.mark_sharding(context,mesh,shard_spec_c)
         h = self.middle_block(h, emb, context=context, batch_size=b)
         for module in self.output_blocks:
+            if mesh is not None:
+                shard_spec = [None for i in range(len(h.shape))]
+                shard_spec[0] = 'data'
+                shard_spec = tuple(shard_spec)
+                shard_spec_c = [None for i in range(len(context.shape))]
+                shard_spec_c[0] = 'data'
+                shard_spec_c = tuple(shard_spec_c)
+                xs.mark_sharding(h,mesh,shard_spec)
+                xs.mark_sharding(context,mesh,shard_spec_c)
             h = torch.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context=context, batch_size=b)
         h = h.type(x.dtype)
+        if mesh is not None:
+            shard_spec = [None for i in range(len(h.shape))]
+            shard_spec[0] = 'data'
+            shard_spec = tuple(shard_spec)
+            shard_spec_c = [None for i in range(len(context.shape))]
+            shard_spec_c[0] = 'data'
+            shard_spec_c = tuple(shard_spec_c)
+            xs.mark_sharding(h,mesh,shard_spec)
+            xs.mark_sharding(context,mesh,shard_spec_c)
         y = self.out(h)
         
         # reshape back to (b c t h w)
         y = rearrange(y, '(b t) c h w -> b c t h w', b=b)
+        if mesh is not None:
+            shard_spec = [None for i in range(len(y.shape))]
+            shard_spec[0] = 'data'
+            shard_spec = tuple(shard_spec)
+            xs.mark_sharding(y,mesh,shard_spec)
         return y
     
