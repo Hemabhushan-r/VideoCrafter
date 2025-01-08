@@ -387,17 +387,23 @@ class TemporalTransformer(nn.Module):
                 x = block(x, mask=mask)
             x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
         else:
-            x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
+            # x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
             context = rearrange(
                 context, '(b t) l con -> b t l con', t=t).contiguous()
             for i, block in enumerate(self.transformer_blocks):
                 # calculate each batch one by one (since number in shape could not greater then 65,535 for some package)
+                curr_context = []
                 for j in range(b):
                     context_j = repeat(
                         context[j],
                         't l con -> (t r) l con', r=(h * w) // t, t=t).contiguous()
-                    # note: causal mask will not applied in cross-attention case
-                    x[j] = block(x[j], context=context_j)
+
+                    curr_context.append(context_j)
+                context = torch.cat(curr_context, dim=0).contiguous()
+                x = block(x, context=context)
+                # note: causal mask will not applied in cross-attention case
+                # x[j] = block(x[j], context=context_j)
+            x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
 
         if self.use_linear:
             x = self.proj_out(x)
